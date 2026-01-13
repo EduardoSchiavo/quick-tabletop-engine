@@ -40,7 +40,12 @@ func main() {
 			}
 			log.Printf("recv: %s", msg)
 
-			if err = c.WriteMessage(mt, msg); err != nil {
+            response := msg
+			if string(msg) == "ping" {
+                response = []byte("pong")
+			}
+
+			if err = c.WriteMessage(mt, response); err != nil {
 				log.Println("write:", err)
 				break
 			}
