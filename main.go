@@ -2,10 +2,20 @@ package main
 
 import (
 	"log"
+    "sync"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/contrib/websocket"
 )
+
+
+var ( 
+    clients = make(map[*websocket.Conn]bool)
+    secretWord string
+    mu sync.Mutex
+)
+
+
 
 func main() {
 	app := fiber.New()
@@ -21,35 +31,48 @@ func main() {
 	})
 
 	app.Get("/ws/:id", websocket.New(func(c *websocket.Conn) {
+        //register connection
+        mu.Lock()
+        clients[c] = true
+
+
 		// c.Locals is added to the *websocket.Conn
 		log.Println(c.Locals("allowed"))  // true
 		log.Println(c.Params("id"))       // 123
 		log.Println(c.Query("v"))         // 1.0
 		log.Println(c.Cookies("session")) // ""
 
-		// websocket.Conn bindings https://pkg.go.dev/github.com/fasthttp/websocket?tab=doc#pkg-index
-		var (
-			mt  int
-			msg []byte
-			err error
-		)
-		for {
-			if mt, msg, err = c.ReadMessage(); err != nil {
+        if secretWord != "" {
+            c.WriteMessage(websocket.TextMessage, []byte(secretWord))
+        }
+        mu.Unlock()
+
+        defer func() {
+            c.Close()
+			mu.Lock()
+			delete(clients, c)
+			mu.Unlock()
+		}()
+
+        for {
+			_, msg, err := c.ReadMessage()
+			if err != nil {
 				log.Println("read:", err)
 				break
 			}
-			log.Printf("recv: %s", msg)
 
-            response := msg
-			if string(msg) == "ping" {
-                response = []byte("pong")
-			}
+			newWord := string(msg)
+			log.Println("new secret word:", newWord)
 
-			if err = c.WriteMessage(mt, response); err != nil {
-				log.Println("write:", err)
-				break
+			// Update state + broadcast
+			mu.Lock()
+			secretWord = newWord
+			for client := range clients {
+				client.WriteMessage(websocket.TextMessage, []byte(secretWord))
 			}
+			mu.Unlock()
 		}
+		// websocket.Conn bindings https://pkg.go.dev/github.com/fasthttp/websocket?tab=doc#pkg-index
 
 	}))
 
