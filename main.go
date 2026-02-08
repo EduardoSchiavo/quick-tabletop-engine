@@ -6,12 +6,22 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/contrib/websocket"
+	"github.com/google/uuid"
+	"github.com/gofiber/fiber/v2/middleware/cors"
+
 )
 
+//TODO: move elsewhere
+type Session struct {
+	ID string
+	Clients map[*websocket.Conn]bool
+	SecretWord string
+}
 
 var ( 
-    clients = make(map[*websocket.Conn]bool)
-    secretWord string
+	//    clients = make(map[*websocket.Conn]bool)
+	//    secretWord string
+	sessions = map[string]*Session{}
     mu sync.Mutex
 )
 
@@ -19,6 +29,12 @@ var (
 
 func main() {
 	app := fiber.New()
+
+	app.Use(cors.New(cors.Config{
+		AllowOrigins: "*",
+		AllowMethods: "GET,POST,OPTIONS",
+		AllowHeaders: "Content-Type",
+	}))
 
 	app.Use("/ws", func(c *fiber.Ctx) error {
 		// IsWebSocketUpgrade returns true if the client
@@ -30,31 +46,39 @@ func main() {
 		return fiber.ErrUpgradeRequired
 	})
 
-	app.Get("/ws/:id", websocket.New(func(c *websocket.Conn) {
-        //register connection
-        mu.Lock()
-        clients[c] = true
 
+	app.Post("/session", createSession)
 
-		// c.Locals is added to the *websocket.Conn
-		log.Println(c.Locals("allowed"))  // true
-		log.Println(c.Params("id"))       // 123
-		log.Println(c.Query("v"))         // 1.0
-		log.Println(c.Cookies("session")) // ""
+	app.Get("/ws/:sessionId", websocket.New(func(c *websocket.Conn) {
+		   sessionId := c.Params("sessionId")
+		   mu.Lock()
+			session, ok := sessions[sessionId]
+			if !ok {
+				mu.Unlock()
+				c.Close()
+				return
+			}
 
-        if secretWord != "" {
-            c.WriteMessage(websocket.TextMessage, []byte(secretWord))
-        }
-        mu.Unlock()
+			session.Clients[c] = true
 
-        defer func() {
-            c.Close()
+	       if session.SecretWord != "" {
+	           c.WriteMessage(websocket.TextMessage, []byte(session.SecretWord))
+	       }
+	       mu.Unlock()
+
+	       defer func() {
+	           c.Close()
 			mu.Lock()
-			delete(clients, c)
+			delete(session.Clients, c)
+			//cleanup empty sessions
+			if len(session.Clients) ==0 {
+				delete(sessions, sessionId)
+				log.Println("session closed since no clients were active:", sessionId)
+			}
 			mu.Unlock()
 		}()
 
-        for {
+	       for {
 			_, msg, err := c.ReadMessage()
 			if err != nil {
 				log.Println("read:", err)
@@ -66,9 +90,9 @@ func main() {
 
 			// Update state + broadcast
 			mu.Lock()
-			secretWord = newWord
-			for client := range clients {
-				client.WriteMessage(websocket.TextMessage, []byte(secretWord))
+			session.SecretWord = newWord
+			for client := range session.Clients {
+				client.WriteMessage(websocket.TextMessage, []byte(session.SecretWord))
 			}
 			mu.Unlock()
 		}
@@ -79,5 +103,32 @@ func main() {
 	log.Fatal(app.Listen(":3000"))
 	// Access the websocket server: ws://localhost:3000/ws/123?v=1.0
 	// https://www.websocket.org/echo.html
+}
+
+
+
+//TODO: move elsewhere
+const maxSessions = 5
+
+func createSession(c *fiber.Ctx) error {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(sessions) >= maxSessions {
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+			"error": "maximum number of sessions reached",
+		})
+	}
+
+	id := uuid.NewString()
+
+	sessions[id] = &Session{
+		ID:      id,
+		Clients: make(map[*websocket.Conn]bool),
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"sessionId": id,
+	})
 }
 
