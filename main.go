@@ -27,7 +27,7 @@ var (
 
 
 
-func main() {
+func setupApp() *fiber.App {
 	app := fiber.New()
 
 	app.Use(cors.New(cors.Config{
@@ -100,9 +100,12 @@ func main() {
 
 	}))
 
+	return app
+}
+
+func main() {
+	app := setupApp()
 	log.Fatal(app.Listen(":3000"))
-	// Access the websocket server: ws://localhost:3000/ws/123?v=1.0
-	// https://www.websocket.org/echo.html
 }
 
 
