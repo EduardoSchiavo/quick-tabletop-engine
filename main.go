@@ -2,30 +2,28 @@ package main
 
 import (
 	"log"
-    "sync"
+	"sync"
 
-	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/contrib/websocket"
-	"github.com/google/uuid"
+	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
-
+	"github.com/google/uuid"
 )
 
-//TODO: move elsewhere
+// TODO: move elsewhere
 type Session struct {
-	ID string
-	Clients map[*websocket.Conn]bool
+	ID         string
+	Clients    map[*websocket.Conn]bool
 	SecretWord string
 }
 
-var ( 
+var (
 	//    clients = make(map[*websocket.Conn]bool)
 	//    secretWord string
+
 	sessions = map[string]*Session{}
-    mu sync.Mutex
+	mu       sync.Mutex
 )
-
-
 
 func setupApp() *fiber.App {
 	app := fiber.New()
@@ -46,39 +44,44 @@ func setupApp() *fiber.App {
 		return fiber.ErrUpgradeRequired
 	})
 
+	app.Get("/health", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{"status": "ok"})
+	})
 
 	app.Post("/session", createSession)
+	app.Get("/session/:id", getSession)
 
 	app.Get("/ws/:sessionId", websocket.New(func(c *websocket.Conn) {
-		   sessionId := c.Params("sessionId")
-		   mu.Lock()
-			session, ok := sessions[sessionId]
-			if !ok {
-				mu.Unlock()
-				c.Close()
-				return
-			}
+		sessionId := c.Params("sessionId")
+		mu.Lock()
+		session, ok := sessions[sessionId]
+		if !ok {
+			mu.Unlock()
+			c.Close()
+			return
+		}
 
-			session.Clients[c] = true
+		session.Clients[c] = true
+		log.Printf("client joined session %s (%d connected)\n", sessionId, len(session.Clients))
 
-	       if session.SecretWord != "" {
-	           c.WriteMessage(websocket.TextMessage, []byte(session.SecretWord))
-	       }
-	       mu.Unlock()
+		if session.SecretWord != "" {
+			c.WriteMessage(websocket.TextMessage, []byte(session.SecretWord))
+		}
+		mu.Unlock()
 
-	       defer func() {
-	           c.Close()
+		defer func() {
+			c.Close()
 			mu.Lock()
 			delete(session.Clients, c)
 			//cleanup empty sessions
-			if len(session.Clients) ==0 {
+			if len(session.Clients) == 0 {
 				delete(sessions, sessionId)
 				log.Println("session closed since no clients were active:", sessionId)
 			}
 			mu.Unlock()
 		}()
 
-	       for {
+		for {
 			_, msg, err := c.ReadMessage()
 			if err != nil {
 				log.Println("read:", err)
@@ -108,9 +111,24 @@ func main() {
 	log.Fatal(app.Listen(":3000"))
 }
 
+func getSession(c *fiber.Ctx) error {
+	id := c.Params("id")
+	mu.Lock()
+	_, ok := sessions[id]
+	mu.Unlock()
 
+	if !ok {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "session not found",
+		})
+	}
 
-//TODO: move elsewhere
+	return c.JSON(fiber.Map{
+		"sessionId": id,
+	})
+}
+
+// TODO: move elsewhere
 const maxSessions = 5
 
 func createSession(c *fiber.Ctx) error {
@@ -130,8 +148,9 @@ func createSession(c *fiber.Ctx) error {
 		Clients: make(map[*websocket.Conn]bool),
 	}
 
+	log.Println("session created:", id)
+
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"sessionId": id,
 	})
 }
-
