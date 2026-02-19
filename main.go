@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"sync"
 
@@ -10,20 +11,97 @@ import (
 	"github.com/google/uuid"
 )
 
-// TODO: move elsewhere
+type TokenData struct {
+	Name      string  `json:"name"`
+	ImgPath   string  `json:"imgPath"`
+	X         float64 `json:"x"`
+	Y         float64 `json:"y"`
+	TokenSize float64 `json:"tokenSize"`
+}
+
+type GameState struct {
+	DisplayedTokens  map[string]TokenData `json:"displayedTokens"`
+	BackgroundImgPath string              `json:"backgroundImgPath"`
+	ShowGrid          bool                `json:"showGrid"`
+	GridUnit          float64             `json:"gridUnit"`
+}
+
+type ClientMessage struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+type ServerMessage struct {
+	Type    string      `json:"type"`
+	Payload interface{} `json:"payload"`
+}
+
+type AddTokenPayload struct {
+	ID    string    `json:"id"`
+	Token TokenData `json:"token"`
+}
+
+type MoveTokenPayload struct {
+	ID string  `json:"id"`
+	X  float64 `json:"x"`
+	Y  float64 `json:"y"`
+}
+
+type DeleteTokenPayload struct {
+	ID string `json:"id"`
+}
+
+type ChangeBackgroundPayload struct {
+	ImgPath string `json:"imgPath"`
+}
+
 type Session struct {
-	ID         string
-	Clients    map[*websocket.Conn]bool
-	SecretWord string
+	ID      string
+	Clients map[*websocket.Conn]bool
+	State   GameState
+}
+
+func newGameState() GameState {
+	return GameState{
+		DisplayedTokens:   make(map[string]TokenData),
+		BackgroundImgPath: "/assets/default/maps/tavern.jpg",
+		ShowGrid:          true,
+		GridUnit:          96,
+	}
 }
 
 var (
-	//    clients = make(map[*websocket.Conn]bool)
-	//    secretWord string
-
 	sessions = map[string]*Session{}
 	mu       sync.Mutex
 )
+
+func broadcastState(session *Session) {
+	msg := ServerMessage{
+		Type:    "state_update",
+		Payload: session.State,
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Println("failed to marshal state:", err)
+		return
+	}
+	for client := range session.Clients {
+		client.WriteMessage(websocket.TextMessage, data)
+	}
+}
+
+func sendState(c *websocket.Conn, state GameState) {
+	msg := ServerMessage{
+		Type:    "state_update",
+		Payload: state,
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Println("failed to marshal state:", err)
+		return
+	}
+	c.WriteMessage(websocket.TextMessage, data)
+}
 
 func setupApp() *fiber.App {
 	app := fiber.New()
@@ -35,8 +113,6 @@ func setupApp() *fiber.App {
 	}))
 
 	app.Use("/ws", func(c *fiber.Ctx) error {
-		// IsWebSocketUpgrade returns true if the client
-		// requested upgrade to the WebSocket protocol.
 		if websocket.IsWebSocketUpgrade(c) {
 			c.Locals("allowed", true)
 			return c.Next()
@@ -64,20 +140,14 @@ func setupApp() *fiber.App {
 		session.Clients[c] = true
 		log.Printf("client joined session %s (%d connected)\n", sessionId, len(session.Clients))
 
-		if session.SecretWord != "" {
-			c.WriteMessage(websocket.TextMessage, []byte(session.SecretWord))
-		}
+		// Send current state to the new client (late-joiner sync)
+		sendState(c, session.State)
 		mu.Unlock()
 
 		defer func() {
 			c.Close()
 			mu.Lock()
 			delete(session.Clients, c)
-			//cleanup empty sessions
-			if len(session.Clients) == 0 {
-				delete(sessions, sessionId)
-				log.Println("session closed since no clients were active:", sessionId)
-			}
 			mu.Unlock()
 		}()
 
@@ -88,19 +158,48 @@ func setupApp() *fiber.App {
 				break
 			}
 
-			newWord := string(msg)
-			log.Println("new secret word:", newWord)
-
-			// Update state + broadcast
-			mu.Lock()
-			session.SecretWord = newWord
-			for client := range session.Clients {
-				client.WriteMessage(websocket.TextMessage, []byte(session.SecretWord))
+			var clientMsg ClientMessage
+			if err := json.Unmarshal(msg, &clientMsg); err != nil {
+				log.Println("invalid message:", err)
+				continue
 			}
+
+			mu.Lock()
+			switch clientMsg.Type {
+			case "add_token":
+				var p AddTokenPayload
+				if err := json.Unmarshal(clientMsg.Payload, &p); err == nil {
+					session.State.DisplayedTokens[p.ID] = p.Token
+				}
+			case "move_token":
+				var p MoveTokenPayload
+				if err := json.Unmarshal(clientMsg.Payload, &p); err == nil {
+					if token, ok := session.State.DisplayedTokens[p.ID]; ok {
+						token.X = p.X
+						token.Y = p.Y
+						session.State.DisplayedTokens[p.ID] = token
+					}
+				}
+			case "delete_token":
+				var p DeleteTokenPayload
+				if err := json.Unmarshal(clientMsg.Payload, &p); err == nil {
+					delete(session.State.DisplayedTokens, p.ID)
+				}
+			case "clear_tokens":
+				session.State.DisplayedTokens = make(map[string]TokenData)
+			case "change_background":
+				var p ChangeBackgroundPayload
+				if err := json.Unmarshal(clientMsg.Payload, &p); err == nil {
+					session.State.BackgroundImgPath = p.ImgPath
+				}
+			case "toggle_grid":
+				session.State.ShowGrid = !session.State.ShowGrid
+			default:
+				log.Println("unknown message type:", clientMsg.Type)
+			}
+			broadcastState(session)
 			mu.Unlock()
 		}
-		// websocket.Conn bindings https://pkg.go.dev/github.com/fasthttp/websocket?tab=doc#pkg-index
-
 	}))
 
 	return app
@@ -128,8 +227,7 @@ func getSession(c *fiber.Ctx) error {
 	})
 }
 
-// TODO: move elsewhere
-const maxSessions = 5
+const maxSessions = 100
 
 func createSession(c *fiber.Ctx) error {
 	mu.Lock()
@@ -146,6 +244,7 @@ func createSession(c *fiber.Ctx) error {
 	sessions[id] = &Session{
 		ID:      id,
 		Clients: make(map[*websocket.Conn]bool),
+		State:   newGameState(),
 	}
 
 	log.Println("session created:", id)
