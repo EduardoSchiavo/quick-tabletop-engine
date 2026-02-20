@@ -10,6 +10,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"quick-tabletop-engine/game"
+	"quick-tabletop-engine/session"
 )
 
 // startTestServer spins up the Fiber app on a random port and returns the base URL.
@@ -18,9 +21,7 @@ func startTestServer(t *testing.T) string {
 	t.Helper()
 
 	// Reset global state between tests.
-	mu.Lock()
-	sessions = map[string]*Session{}
-	mu.Unlock()
+	sessionManager.Reset()
 
 	app := setupApp()
 
@@ -84,8 +85,8 @@ func connectWS(t *testing.T, addr, sessionId string) *websocket.Conn {
 }
 
 // readStateUpdate reads a message, parses it as a ServerMessage with state_update type,
-// and returns the GameState payload.
-func readStateUpdate(t *testing.T, conn *websocket.Conn, timeout time.Duration) GameState {
+// and returns the game.State payload.
+func readStateUpdate(t *testing.T, conn *websocket.Conn, timeout time.Duration) game.State {
 	t.Helper()
 	conn.SetReadDeadline(time.Now().Add(timeout))
 	_, msg, err := conn.ReadMessage()
@@ -93,7 +94,7 @@ func readStateUpdate(t *testing.T, conn *websocket.Conn, timeout time.Duration) 
 		t.Fatalf("failed to read message: %v", err)
 	}
 
-	var serverMsg ServerMessage
+	var serverMsg session.ServerMessage
 	if err := json.Unmarshal(msg, &serverMsg); err != nil {
 		t.Fatalf("failed to unmarshal server message: %v", err)
 	}
@@ -101,12 +102,12 @@ func readStateUpdate(t *testing.T, conn *websocket.Conn, timeout time.Duration) 
 		t.Fatalf("expected type state_update, got %s", serverMsg.Type)
 	}
 
-	// Re-marshal payload and unmarshal into GameState
+	// Re-marshal payload and unmarshal into game.State
 	payloadBytes, err := json.Marshal(serverMsg.Payload)
 	if err != nil {
 		t.Fatalf("failed to marshal payload: %v", err)
 	}
-	var state GameState
+	var state game.State
 	if err := json.Unmarshal(payloadBytes, &state); err != nil {
 		t.Fatalf("failed to unmarshal game state: %v", err)
 	}
@@ -124,7 +125,7 @@ func sendCommand(t *testing.T, conn *websocket.Conn, msgType string, payload int
 			t.Fatalf("failed to marshal payload: %v", err)
 		}
 	}
-	msg := ClientMessage{Type: msgType, Payload: raw}
+	msg := session.ClientMessage{Type: msgType, Payload: raw}
 	data, err := json.Marshal(msg)
 	if err != nil {
 		t.Fatalf("failed to marshal command: %v", err)
@@ -152,9 +153,9 @@ func TestCreateSessionAndJoin(t *testing.T) {
 	}
 
 	// Send add_token command and verify state_update
-	sendCommand(t, conn, "add_token", AddTokenPayload{
+	sendCommand(t, conn, "add_token", game.AddTokenPayload{
 		ID: "token-1",
-		Token: TokenData{
+		Token: game.TokenData{
 			Name:      "Goblin",
 			ImgPath:   "/goblin.jpg",
 			X:         96,
@@ -206,9 +207,9 @@ func TestBroadcastWithinSession(t *testing.T) {
 	}
 
 	// Client 0 sends an add_token command
-	sendCommand(t, conns[0], "add_token", AddTokenPayload{
+	sendCommand(t, conns[0], "add_token", game.AddTokenPayload{
 		ID:    "broadcast-token",
-		Token: TokenData{Name: "Orc", ImgPath: "/orc.jpg", X: 100, Y: 200, TokenSize: 96},
+		Token: game.TokenData{Name: "Orc", ImgPath: "/orc.jpg", X: 100, Y: 200, TokenSize: 96},
 	})
 
 	// All clients should receive the state_update
@@ -240,9 +241,9 @@ func TestBroadcastIsolationBetweenSessions(t *testing.T) {
 	readStateUpdate(t, conn2, 2*time.Second)
 
 	// Send a command in session 1
-	sendCommand(t, conn1, "add_token", AddTokenPayload{
+	sendCommand(t, conn1, "add_token", game.AddTokenPayload{
 		ID:    "s1-token",
-		Token: TokenData{Name: "Elf", ImgPath: "/elf.jpg", X: 50, Y: 50, TokenSize: 96},
+		Token: game.TokenData{Name: "Elf", ImgPath: "/elf.jpg", X: 50, Y: 50, TokenSize: 96},
 	})
 
 	// Client in session 1 should receive state_update
@@ -267,9 +268,9 @@ func TestNewClientReceivesCurrentState(t *testing.T) {
 	conn1 := connectWS(t, addr, sessionId)
 	readStateUpdate(t, conn1, 2*time.Second) // drain initial state
 
-	sendCommand(t, conn1, "add_token", AddTokenPayload{
+	sendCommand(t, conn1, "add_token", game.AddTokenPayload{
 		ID:    "existing-token",
-		Token: TokenData{Name: "Dragon", ImgPath: "/dragon.jpg", X: 200, Y: 300, TokenSize: 96},
+		Token: game.TokenData{Name: "Dragon", ImgPath: "/dragon.jpg", X: 200, Y: 300, TokenSize: 96},
 	})
 	readStateUpdate(t, conn1, 2*time.Second) // drain broadcast
 
