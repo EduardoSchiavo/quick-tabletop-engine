@@ -8,11 +8,21 @@ type TokenData struct {
 	TokenSize float64 `json:"tokenSize"`
 }
 
+type AreaTemplate struct {
+	Shape   string  `json:"shape"`   // "circle" or "square"
+	X       float64 `json:"x"`
+	Y       float64 `json:"y"`
+	Size    float64 `json:"size"`    // in grid units
+	Color   string  `json:"color"`   // hex e.g. "#ff0000"
+	Opacity float64 `json:"opacity"` // 0.0–1.0
+}
+
 type State struct {
-	DisplayedTokens   map[string]TokenData `json:"displayedTokens"`
-	BackgroundImgPath string               `json:"backgroundImgPath"`
-	ShowGrid          bool                 `json:"showGrid"`
-	GridUnit          float64              `json:"gridUnit"`
+	DisplayedTokens   map[string]TokenData    `json:"displayedTokens"`
+	BackgroundImgPath string                  `json:"backgroundImgPath"`
+	ShowGrid          bool                    `json:"showGrid"`
+	GridUnit          float64                 `json:"gridUnit"`
+	AreaTemplates     map[string]AreaTemplate `json:"areaTemplates"`
 }
 
 func NewState() State {
@@ -21,6 +31,7 @@ func NewState() State {
 		BackgroundImgPath: "/assets/default/maps/tavern.jpg",
 		ShowGrid:          true,
 		GridUnit:          96,
+		AreaTemplates:     make(map[string]AreaTemplate),
 	}
 }
 
@@ -52,7 +63,27 @@ func (s *State) ToggleGrid() {
 	s.ShowGrid = !s.ShowGrid
 }
 
-// Paloads marshalling
+func (s *State) AddAreaTemplate(id string, t AreaTemplate) {
+	s.AreaTemplates[id] = t
+}
+
+func (s *State) MoveAreaTemplate(id string, x, y float64) {
+	if t, ok := s.AreaTemplates[id]; ok {
+		t.X = x
+		t.Y = y
+		s.AreaTemplates[id] = t
+	}
+}
+
+func (s *State) DeleteAreaTemplate(id string) {
+	delete(s.AreaTemplates, id)
+}
+
+func (s *State) ClearAreaTemplates() {
+	s.AreaTemplates = make(map[string]AreaTemplate)
+}
+
+// Payload types for marshalling
 type AddTokenPayload struct {
 	ID    string    `json:"id"`
 	Token TokenData `json:"token"`
@@ -70,4 +101,19 @@ type DeleteTokenPayload struct {
 
 type ChangeBackgroundPayload struct {
 	ImgPath string `json:"imgPath"`
+}
+
+type AddAreaTemplatePayload struct {
+	ID       string       `json:"id"`
+	Template AreaTemplate `json:"template"`
+}
+
+type MoveAreaTemplatePayload struct {
+	ID string  `json:"id"`
+	X  float64 `json:"x"`
+	Y  float64 `json:"y"`
+}
+
+type DeleteAreaTemplatePayload struct {
+	ID string `json:"id"`
 }

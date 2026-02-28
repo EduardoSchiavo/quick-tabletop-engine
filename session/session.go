@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
+	"time"
 
+	"quick-tabletop-engine/config"
 	"quick-tabletop-engine/game"
+	"quick-tabletop-engine/store"
 
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
@@ -29,27 +32,131 @@ type Session struct {
 }
 
 type Manager struct {
-	sessions  map[string]*Session
-	mu       sync.Mutex
-	maxSessions int
+	sessions         map[string]*Session
+	mu               sync.Mutex
+	cfg              config.Config
+	store            *store.Store
+	snapshotInterval time.Duration
+	stopSnapshot     chan struct{}
 }
 
-func NewManager(maxSessions int) *Manager{
+func NewManager(cfg config.Config) *Manager {
 	return &Manager{
 		sessions: make(map[string]*Session),
-		maxSessions: maxSessions,
+		cfg:      cfg,
 	}
 }
 
-func (m *Manager) Reset(){
-	m.sessions = make(map[string]*Session)}
+func (m *Manager) Reset() {
+	m.sessions = make(map[string]*Session)
+}
 
+// SetStore configures the persistence store and snapshot interval.
+func (m *Manager) SetStore(s *store.Store, interval time.Duration) {
+	m.store = s
+	m.snapshotInterval = interval
+}
+
+// RestoreSessions loads snapshots from the store and creates sessions with restored state.
+func (m *Manager) RestoreSessions() {
+	if m.store == nil {
+		return
+	}
+
+	snapshots, err := m.store.LoadAllSnapshots()
+	if err != nil {
+		log.Printf("warning: failed to load snapshots: %v", err)
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for sessionID, stateJSON := range snapshots {
+		var state game.State
+		if err := json.Unmarshal(stateJSON, &state); err != nil {
+			log.Printf("warning: failed to unmarshal state for session %s: %v", sessionID, err)
+			continue
+		}
+		// Ensure maps are initialized
+		if state.DisplayedTokens == nil {
+			state.DisplayedTokens = make(map[string]game.TokenData)
+		}
+		if state.AreaTemplates == nil {
+			state.AreaTemplates = make(map[string]game.AreaTemplate)
+		}
+		m.sessions[sessionID] = &Session{
+			ID:      sessionID,
+			Clients: make(map[*websocket.Conn]bool),
+			State:   state,
+		}
+		log.Printf("restored session %s from snapshot", sessionID)
+	}
+}
+
+// StartPeriodicSnapshots starts a goroutine that periodically saves all session states.
+func (m *Manager) StartPeriodicSnapshots() {
+	if m.store == nil {
+		return
+	}
+
+	m.stopSnapshot = make(chan struct{})
+	ticker := time.NewTicker(m.snapshotInterval)
+
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				m.saveAllSnapshots()
+			case <-m.stopSnapshot:
+				return
+			}
+		}
+	}()
+}
+
+// StopPeriodicSnapshots stops the periodic snapshot goroutine and does one final save.
+func (m *Manager) StopPeriodicSnapshots() {
+	if m.store == nil || m.stopSnapshot == nil {
+		return
+	}
+
+	close(m.stopSnapshot)
+	m.saveAllSnapshots()
+}
+
+// saveAllSnapshots saves the state of every session to the store.
+func (m *Manager) saveAllSnapshots() {
+	m.mu.Lock()
+	// Copy session IDs and states while holding the lock
+	type snapshot struct {
+		id    string
+		state game.State
+	}
+	snaps := make([]snapshot, 0, len(m.sessions))
+	for id, sess := range m.sessions {
+		snaps = append(snaps, snapshot{id: id, state: sess.State})
+	}
+	m.mu.Unlock()
+
+	for _, snap := range snaps {
+		data, err := json.Marshal(snap.state)
+		if err != nil {
+			log.Printf("warning: failed to marshal state for session %s: %v", snap.id, err)
+			continue
+		}
+		if err := m.store.SaveSnapshot(snap.id, data); err != nil {
+			log.Printf("warning: failed to save snapshot for session %s: %v", snap.id, err)
+		}
+	}
+}
 
 func (m *Manager) CreateSession(c *fiber.Ctx) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if len(m.sessions) >= m.maxSessions {
+	if len(m.sessions) >= m.cfg.MaxSessions {
 		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
 			"error": "maximum number of sessions reached",
 		})
@@ -87,51 +194,78 @@ func (m *Manager) GetSession(c *fiber.Ctx) error {
 	})
 }
 
+// WS handler
+func (m *Manager) HandleWS(c *websocket.Conn) {
+	sessionId := c.Params("sessionId")
+	m.mu.Lock()
+	session, ok := m.sessions[sessionId]
+	if !ok {
+		m.mu.Unlock()
+		c.Close()
+		return
+	}
 
-//WS handler
-func (m *Manager) HandleWS(c *websocket.Conn){
-		sessionId := c.Params("sessionId")
-		m.mu.Lock()
-		session, ok := m.sessions[sessionId]
-		if !ok {
-			m.mu.Unlock()
-			c.Close()
-			return
+	// Check if session is full
+	if len(session.Clients) >= m.cfg.MaxUsersPerSession {
+		m.mu.Unlock()
+		errMsg := ServerMessage{
+			Type: "error",
+			Payload: map[string]string{
+				"error": "session is full",
+			},
 		}
+		data, _ := json.Marshal(errMsg)
+		c.WriteMessage(websocket.TextMessage, data)
+		c.Close()
+		return
+	}
 
-		session.Clients[c] = true
-		log.Printf("client joined session %s (%d connected)\n", sessionId, len(session.Clients))
+	session.Clients[c] = true
+	log.Printf("client joined session %s (%d connected)\n", sessionId, len(session.Clients))
 
-		// Send current state to the new client (late-joiner sync)
-		sendState(c, session.State)
+	// Send current state to the new client (late-joiner sync)
+	sendState(c, session.State)
+	m.mu.Unlock()
+
+	defer func() {
+		c.Close()
+		m.mu.Lock()
+		delete(session.Clients, c)
+		remaining := len(session.Clients)
 		m.mu.Unlock()
 
-		defer func() {
-			c.Close()
-			m.mu.Lock()
-			delete(session.Clients, c)
-			m.mu.Unlock()
-		}()
-
-		for {
-			_, msg, err := c.ReadMessage()
-			if err != nil {
-				log.Println("read:", err)
-				break
-			}
-
-			var clientMsg ClientMessage
-			if err := json.Unmarshal(msg, &clientMsg); err != nil {
-				log.Println("invalid message:", err)
-				continue
-			}
-
-			m.mu.Lock()
-			processCommand(clientMsg, &session.State)
-			broadcastState(session)
-			m.mu.Unlock()
+		if remaining == 0 {
+			time.AfterFunc(2*time.Second, func() {
+				m.mu.Lock()
+				defer m.mu.Unlock()
+				s, ok := m.sessions[sessionId]
+				if ok && len(s.Clients) == 0 {
+					delete(m.sessions, sessionId)
+					log.Printf("session %s removed (no clients remaining)\n", sessionId)
+				}
+			})
 		}
+	}()
+
+	for {
+		_, msg, err := c.ReadMessage()
+		if err != nil {
+			log.Println("read:", err)
+			break
+		}
+
+		var clientMsg ClientMessage
+		if err := json.Unmarshal(msg, &clientMsg); err != nil {
+			log.Println("invalid message:", err)
+			continue
+		}
+
+		m.mu.Lock()
+		processCommand(clientMsg, &session.State)
+		broadcastState(session)
+		m.mu.Unlock()
 	}
+}
 
 func processCommand(msg ClientMessage, state *game.State) {
 	switch msg.Type {
@@ -159,13 +293,31 @@ func processCommand(msg ClientMessage, state *game.State) {
 		}
 	case "toggle_grid":
 		state.ToggleGrid()
+	case "add_area_template":
+		var p game.AddAreaTemplatePayload
+		if err := json.Unmarshal(msg.Payload, &p); err == nil {
+			id := p.ID
+			if id == "" {
+				id = uuid.NewString()
+			}
+			state.AddAreaTemplate(id, p.Template)
+		}
+	case "move_area_template":
+		var p game.MoveAreaTemplatePayload
+		if err := json.Unmarshal(msg.Payload, &p); err == nil {
+			state.MoveAreaTemplate(p.ID, p.X, p.Y)
+		}
+	case "delete_area_template":
+		var p game.DeleteAreaTemplatePayload
+		if err := json.Unmarshal(msg.Payload, &p); err == nil {
+			state.DeleteAreaTemplate(p.ID)
+		}
+	case "clear_area_templates":
+		state.ClearAreaTemplates()
 	default:
 		log.Println("unknown message type:", msg.Type)
 	}
 }
-
-
-
 
 func broadcastState(session *Session) {
 	msg := ServerMessage{

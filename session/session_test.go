@@ -4,14 +4,25 @@ import (
 	"encoding/json"
 	"testing"
 
+	"quick-tabletop-engine/config"
 	"quick-tabletop-engine/game"
 )
 
-func TestNewManager(t *testing.T) {
-	m := NewManager(10)
+func testConfig() config.Config {
+	return config.Config{
+		MaxSessions:        10,
+		MaxUsersPerSession: 10,
+		SnapshotIntervalSec: 30,
+		DatabaseURL:        "",
+	}
+}
 
-	if m.maxSessions != 10 {
-		t.Errorf("expected maxSessions 10, got %d", m.maxSessions)
+func TestNewManager(t *testing.T) {
+	cfg := testConfig()
+	m := NewManager(cfg)
+
+	if m.cfg.MaxSessions != 10 {
+		t.Errorf("expected maxSessions 10, got %d", m.cfg.MaxSessions)
 	}
 	if len(m.sessions) != 0 {
 		t.Errorf("expected 0 sessions, got %d", len(m.sessions))
@@ -19,7 +30,7 @@ func TestNewManager(t *testing.T) {
 }
 
 func TestManagerReset(t *testing.T) {
-	m := NewManager(10)
+	m := NewManager(testConfig())
 	m.sessions["fake"] = &Session{ID: "fake", State: game.NewState()}
 
 	m.Reset()
@@ -128,5 +139,101 @@ func TestProcessCommandUnknownType(t *testing.T) {
 	// Should not panic, state should be unchanged
 	if len(state.DisplayedTokens) != 0 {
 		t.Error("state should be unchanged for unknown command")
+	}
+}
+
+func TestProcessCommandAddAreaTemplate(t *testing.T) {
+	state := game.NewState()
+	cmd := makeCommand(t, "add_area_template", game.AddAreaTemplatePayload{
+		ID: "at1",
+		Template: game.AreaTemplate{
+			Shape:   "circle",
+			X:       192,
+			Y:       288,
+			Size:    3,
+			Color:   "#ff0000",
+			Opacity: 0.5,
+		},
+	})
+
+	processCommand(cmd, &state)
+
+	if len(state.AreaTemplates) != 1 {
+		t.Fatalf("expected 1 area template, got %d", len(state.AreaTemplates))
+	}
+	got := state.AreaTemplates["at1"]
+	if got.Shape != "circle" {
+		t.Errorf("expected shape circle, got %q", got.Shape)
+	}
+	if got.Color != "#ff0000" {
+		t.Errorf("expected color #ff0000, got %q", got.Color)
+	}
+}
+
+func TestProcessCommandAddAreaTemplateAutoID(t *testing.T) {
+	state := game.NewState()
+	// Send without an ID — processCommand should generate a UUID
+	cmd := makeCommand(t, "add_area_template", game.AddAreaTemplatePayload{
+		Template: game.AreaTemplate{
+			Shape:   "square",
+			X:       96,
+			Y:       96,
+			Size:    2,
+			Color:   "#00ff00",
+			Opacity: 0.3,
+		},
+	})
+
+	processCommand(cmd, &state)
+
+	if len(state.AreaTemplates) != 1 {
+		t.Fatalf("expected 1 area template, got %d", len(state.AreaTemplates))
+	}
+	// Verify the generated ID is not empty
+	for id, tmpl := range state.AreaTemplates {
+		if id == "" {
+			t.Error("expected non-empty auto-generated ID")
+		}
+		if tmpl.Shape != "square" {
+			t.Errorf("expected shape square, got %q", tmpl.Shape)
+		}
+	}
+}
+
+func TestProcessCommandMoveAreaTemplate(t *testing.T) {
+	state := game.NewState()
+	state.AddAreaTemplate("at1", game.AreaTemplate{Shape: "circle", X: 96, Y: 96, Size: 2, Color: "#ff0000", Opacity: 0.5})
+
+	cmd := makeCommand(t, "move_area_template", game.MoveAreaTemplatePayload{ID: "at1", X: 384, Y: 480})
+	processCommand(cmd, &state)
+
+	got := state.AreaTemplates["at1"]
+	if got.X != 384 || got.Y != 480 {
+		t.Errorf("expected position (384,480), got (%f,%f)", got.X, got.Y)
+	}
+}
+
+func TestProcessCommandDeleteAreaTemplate(t *testing.T) {
+	state := game.NewState()
+	state.AddAreaTemplate("at1", game.AreaTemplate{Shape: "circle", X: 96, Y: 96, Size: 2, Color: "#ff0000", Opacity: 0.5})
+
+	cmd := makeCommand(t, "delete_area_template", game.DeleteAreaTemplatePayload{ID: "at1"})
+	processCommand(cmd, &state)
+
+	if len(state.AreaTemplates) != 0 {
+		t.Errorf("expected 0 area templates, got %d", len(state.AreaTemplates))
+	}
+}
+
+func TestProcessCommandClearAreaTemplates(t *testing.T) {
+	state := game.NewState()
+	state.AddAreaTemplate("at1", game.AreaTemplate{Shape: "circle", X: 96, Y: 96, Size: 2, Color: "#ff0000", Opacity: 0.5})
+	state.AddAreaTemplate("at2", game.AreaTemplate{Shape: "square", X: 192, Y: 192, Size: 3, Color: "#00ff00", Opacity: 0.3})
+
+	cmd := makeCommand(t, "clear_area_templates", nil)
+	processCommand(cmd, &state)
+
+	if len(state.AreaTemplates) != 0 {
+		t.Errorf("expected 0 area templates after clear, got %d", len(state.AreaTemplates))
 	}
 }

@@ -11,9 +11,19 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"quick-tabletop-engine/config"
 	"quick-tabletop-engine/game"
 	"quick-tabletop-engine/session"
 )
+
+func testConfig() config.Config {
+	return config.Config{
+		MaxSessions:        10,
+		MaxUsersPerSession: 3,
+		SnapshotIntervalSec: 30,
+		DatabaseURL:        "",
+	}
+}
 
 // startTestServer spins up the Fiber app on a random port and returns the base URL.
 // It also resets global state so tests are isolated.
@@ -21,7 +31,8 @@ func startTestServer(t *testing.T) string {
 	t.Helper()
 
 	// Reset global state between tests.
-	sessionManager.Reset()
+	cfg = testConfig()
+	sessionManager = session.NewManager(cfg)
 
 	app := setupApp()
 
@@ -112,6 +123,22 @@ func readStateUpdate(t *testing.T, conn *websocket.Conn, timeout time.Duration) 
 		t.Fatalf("failed to unmarshal game state: %v", err)
 	}
 	return state
+}
+
+// readServerMessage reads a raw ServerMessage from the WebSocket.
+func readServerMessage(t *testing.T, conn *websocket.Conn, timeout time.Duration) session.ServerMessage {
+	t.Helper()
+	conn.SetReadDeadline(time.Now().Add(timeout))
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("failed to read message: %v", err)
+	}
+
+	var serverMsg session.ServerMessage
+	if err := json.Unmarshal(msg, &serverMsg); err != nil {
+		t.Fatalf("failed to unmarshal server message: %v", err)
+	}
+	return serverMsg
 }
 
 // sendCommand sends a JSON command over the WebSocket.
@@ -313,5 +340,47 @@ func TestToggleGrid(t *testing.T) {
 	state = readStateUpdate(t, conn, 2*time.Second)
 	if !state.ShowGrid {
 		t.Error("expected showGrid to be true after second toggle")
+	}
+}
+
+func TestSessionUserLimit(t *testing.T) {
+	addr := startTestServer(t)
+	sessionId := createTestSession(t, addr)
+
+	// testConfig sets MaxUsersPerSession to 3
+	// Connect 3 clients (should all succeed)
+	conns := make([]*websocket.Conn, 3)
+	for i := range conns {
+		conns[i] = connectWS(t, addr, sessionId)
+		readStateUpdate(t, conns[i], 2*time.Second) // drain initial state
+	}
+
+	// 4th client should get an error message and be disconnected
+	url := fmt.Sprintf("ws://%s/ws/%s", addr, sessionId)
+	extraConn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatalf("expected to connect (server sends error then closes): %v", err)
+	}
+	defer extraConn.Close()
+
+	// Read the error message
+	serverMsg := readServerMessage(t, extraConn, 2*time.Second)
+	if serverMsg.Type != "error" {
+		t.Fatalf("expected error message type, got %q", serverMsg.Type)
+	}
+
+	// Verify the error payload
+	payloadBytes, _ := json.Marshal(serverMsg.Payload)
+	var errPayload map[string]string
+	json.Unmarshal(payloadBytes, &errPayload)
+	if errPayload["error"] != "session is full" {
+		t.Errorf("expected 'session is full' error, got %q", errPayload["error"])
+	}
+
+	// Connection should be closed by server — next read should fail
+	extraConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, err = extraConn.ReadMessage()
+	if err == nil {
+		t.Error("expected connection to be closed after error")
 	}
 }
