@@ -196,6 +196,7 @@ func (m *Manager) GetSession(c *fiber.Ctx) error {
 
 // WS handler
 func (m *Manager) HandleWS(c *websocket.Conn) {
+	c.SetReadLimit(4096) // 4KB max message size
 	sessionId := c.Params("sessionId")
 	m.mu.Lock()
 	session, ok := m.sessions[sessionId]
