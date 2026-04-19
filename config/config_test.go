@@ -18,6 +18,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.SnapshotIntervalSec != 30 {
 		t.Errorf("expected SnapshotIntervalSec 30, got %d", cfg.SnapshotIntervalSec)
 	}
+	if cfg.SessionTimeoutSec != 30 {
+		t.Errorf("expected SessionTimeoutSec 30, got %d", cfg.SessionTimeoutSec)
+	}
 	if cfg.DatabaseURL != "postgres://quicktt:quicktt@localhost:5432/quicktabletop?sslmode=disable" {
 		t.Errorf("unexpected DatabaseURL: %q", cfg.DatabaseURL)
 	}
@@ -31,6 +34,7 @@ func TestLoadValidFile(t *testing.T) {
 		"maxSessions": 20,
 		"maxUsersPerSession": 50,
 		"snapshotIntervalSec": 60,
+		"sessionTimeoutSec": 45,
 		"databaseURL": "postgres://user:pass@host:5432/db"
 	}`
 	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
@@ -47,6 +51,9 @@ func TestLoadValidFile(t *testing.T) {
 	}
 	if cfg.SnapshotIntervalSec != 60 {
 		t.Errorf("expected SnapshotIntervalSec 60, got %d", cfg.SnapshotIntervalSec)
+	}
+	if cfg.SessionTimeoutSec != 45 {
+		t.Errorf("expected SessionTimeoutSec 45, got %d", cfg.SessionTimeoutSec)
 	}
 	if cfg.DatabaseURL != "postgres://user:pass@host:5432/db" {
 		t.Errorf("unexpected DatabaseURL: %q", cfg.DatabaseURL)
@@ -99,6 +106,9 @@ func TestLoadPartialJSON(t *testing.T) {
 	}
 	if cfg.SnapshotIntervalSec != 30 {
 		t.Errorf("expected default SnapshotIntervalSec 30, got %d", cfg.SnapshotIntervalSec)
+	}
+	if cfg.SessionTimeoutSec != 30 {
+		t.Errorf("expected default SessionTimeoutSec 30, got %d", cfg.SessionTimeoutSec)
 	}
 	if cfg.DatabaseURL != "postgres://quicktt:quicktt@localhost:5432/quicktabletop?sslmode=disable" {
 		t.Errorf("expected default DatabaseURL, got %q", cfg.DatabaseURL)

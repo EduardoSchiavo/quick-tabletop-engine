@@ -235,7 +235,8 @@ func (m *Manager) HandleWS(c *websocket.Conn) {
 		m.mu.Unlock()
 
 		if remaining == 0 {
-			time.AfterFunc(2*time.Second, func() {
+			timeout := time.Duration(m.cfg.SessionTimeoutSec) * time.Second
+			time.AfterFunc(timeout, func() {
 				m.mu.Lock()
 				defer m.mu.Unlock()
 				s, ok := m.sessions[sessionId]
@@ -257,6 +258,10 @@ func (m *Manager) HandleWS(c *websocket.Conn) {
 		var clientMsg ClientMessage
 		if err := json.Unmarshal(msg, &clientMsg); err != nil {
 			log.Println("invalid message:", err)
+			continue
+		}
+
+		if clientMsg.Type == "ping" {
 			continue
 		}
 
