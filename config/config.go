@@ -10,6 +10,7 @@ type Config struct {
 	MaxSessions        int    `json:"maxSessions"`
 	MaxUsersPerSession int    `json:"maxUsersPerSession"`
 	SnapshotIntervalSec int   `json:"snapshotIntervalSec"`
+	SessionTimeoutSec  int    `json:"sessionTimeoutSec"`
 	DatabaseURL        string `json:"databaseURL"`
 }
 
@@ -18,6 +19,7 @@ func DefaultConfig() Config {
 		MaxSessions:        5,
 		MaxUsersPerSession: 10,
 		SnapshotIntervalSec: 30,
+		SessionTimeoutSec:  30,
 		DatabaseURL:        "postgres://quicktt:quicktt@localhost:5432/quicktabletop?sslmode=disable",
 	}
 }
