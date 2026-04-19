@@ -1,0 +1,7 @@
+{
+  "maxSessions": 20,
+  "maxUsersPerSession": 10,
+  "snapshotIntervalSec": 30,
+  "sessionTimeoutSec": 30,
+  "databaseURL": "postgres://quicktt:quicktt@localhost:5432/quicktabletop?sslmode=disable"
+}

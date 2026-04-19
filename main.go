@@ -2,16 +2,20 @@ package main
 
 import (
 	"log"
+	"os"
+	"time"
 
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 
+	"quick-tabletop-engine/config"
 	"quick-tabletop-engine/session"
+	"quick-tabletop-engine/store"
 )
 
-// hardcoded 5 session limit
-var sessionManager = session.NewManager(5)
+var cfg = config.Load("config.json")
+var sessionManager = session.NewManager(cfg)
 
 func setupApp() *fiber.App {
 	app := fiber.New()
@@ -43,7 +47,26 @@ func setupApp() *fiber.App {
 }
 
 func main() {
+	// Allow DATABASE_URL env var to override config file
+	dbURL := cfg.DatabaseURL
+	if envURL := os.Getenv("DATABASE_URL"); envURL != "" {
+		dbURL = envURL
+	}
+
+	if dbURL != "" {
+		s, err := store.New(dbURL)
+		if err != nil {
+			log.Printf("warning: failed to connect to database: %v — running without persistence", err)
+		} else {
+			interval := time.Duration(cfg.SnapshotIntervalSec) * time.Second
+			sessionManager.SetStore(s, interval)
+			sessionManager.RestoreSessions()
+			sessionManager.StartPeriodicSnapshots()
+			defer sessionManager.StopPeriodicSnapshots()
+			defer s.Close()
+		}
+	}
+
 	app := setupApp()
 	log.Fatal(app.Listen(":3000"))
 }
-
